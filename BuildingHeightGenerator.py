@@ -250,12 +250,17 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
 
                 #print(str(building.id))
 
-                buildingHeight = np.max( surfaceHeight[buildingOutlineArray] )
+                buildingOutlineSurfaceHeight = surfaceHeight[buildingOutlineArray]
+
+                if(buildingOutlineSurfaceHeight.size == 0):
+                    continue
+
+                buildingHeight = np.max( buildingOutlineSurfaceHeight )
                 wayUrl = "https://www.openstreetmap.org/way/" + str( building.id ) + ": " + str(buildingHeight) 
                 print(wayUrl)
 
                 
-                if(buildingHeight > 0):
+                if(buildingHeight > 1):
 
                     totalNumberOfBuildings = totalNumberOfBuildings + 1
 
