@@ -269,10 +269,12 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
                 
                 if(buildingHeight > 1):
 
+                    buildingHeight = round(buildingHeight,1)
+
                     totalNumberOfBuildings = totalNumberOfBuildings + 1
 
                     outputFile.write('\n<node id="%d" lat="%f" lon="%f">' % ( -totalNumberOfBuildings, averageLat, averageLon ) )
-                    outputFile.write('\n  <tag k="height" v="%f" />' % buildingHeight)
+                    outputFile.write('\n  <tag k="height" v="%.1f" />' % buildingHeight)
                     outputFile.write('\n</node>')
 
                     with open('buildings.txt', 'a') as f:
