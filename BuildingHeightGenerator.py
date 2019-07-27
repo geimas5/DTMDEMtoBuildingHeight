@@ -22,6 +22,7 @@ parser.add_argument('outputFilename', type=str)
 parser.add_argument('--gridSquareSize', type=float, default=2)
 parser.add_argument('--overpassRetryCount', type=int, default=100)
 parser.add_argument('--overpassFailRetryDelay', type=int, default=15)
+parser.add_argument('--overpassApiUrl', type=str, default=None)
 
 
 args = parser.parse_args()
@@ -32,9 +33,12 @@ gridSquareSize = args.gridSquareSize
 overpassRetryCount = args.overpassRetryCount
 outputFilename = args.outputFilename
 overpassFailRetryDelay = args.overpassFailRetryDelay
+overpassApiUrl = args.overpassApiUrl
 
 earthRadius = 6378.137
 meterInDegree = ( 1 / ( ( 2 * math.pi / 360) * earthRadius ) ) / 1000
+
+
 
 def downloadBuildings( left, bottom, right, top ):
 
@@ -45,11 +49,14 @@ def downloadBuildings( left, bottom, right, top ):
     print("  Bounds in epsg:4326: (left=%f, bottom=%f, right=%f, top=%f)" % ( ( left, bottom, right, top ) ) )
     print("  Bounds height: %f km, width: %f km" % ( squareHeight, squareWidth ) )
 
-    api = overpy.Overpass()
+    print("http://bboxfinder.com  bbox: ( %f, %f, %f, %f )" % ( left, bottom, right, top ))
+
+    api = overpy.Overpass(url=overpassApiUrl)
 
     query = '''[out:json][timeout:500][maxsize:1000000000][bbox:%f,%f,%f,%f];
     ( 
       way["building"]; 
+      way["building:part"]; 
     );
     (._;>;);
     out meta;''' % ( bottom, left, top, right )
@@ -70,7 +77,7 @@ def downloadBuildings( left, bottom, right, top ):
     print("Unable to query overpass with %d retries" % overpassRetryCount)
     exit()
         
-        
+
 
 with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, open(outputFilename, "w") as outputFile:
 
@@ -86,19 +93,24 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
 
     print("Bounds in source coordinate system" + str(lidar_dtm.bounds))
 
-    bottom, right = sourceProj( lidar_dtm.bounds.left, lidar_dtm.bounds.top, inverse=True )
-    top, left =  sourceProj( lidar_dtm.bounds.right, lidar_dtm.bounds.bottom, inverse=True )
+    left, top = sourceProj( lidar_dtm.bounds.left, lidar_dtm.bounds.top, inverse=True )
+    right, bottom =  sourceProj( lidar_dtm.bounds.right, lidar_dtm.bounds.bottom, inverse=True )
 
-    boundsHeight = geopy.distance.geodesic( ( left, top ), ( left, bottom ) ).km
-    boundsWidth = geopy.distance.geodesic( ( left,top ), ( right,top ) ).km
+    boundsHeight = geopy.distance.geodesic( ( top, left ), ( bottom, left ) ).km
+    boundsWidth = geopy.distance.geodesic( ( top, left ), ( top, right ) ).km
 
     print("\n\n")
     print("Bounds in epsg:4326: (left=%f, bottom=%f, right=%f, top=%f)" % ( ( left, bottom, right, top ) ) )
     print("Bounds height: %f km, width: %f km" % ( boundsHeight, boundsWidth ) )
+    print("http://bboxfinder.com  bbox: ( %f, %f, %f, %f )" % ( left, bottom, right, top ))
 
-
+    print("Starting to load DTM")
     dtmData = lidar_dtm.read(1)
+    print("DTM loaded")
+
+    print("Starting to load DSM")
     domData = lidar_dom.read(1)
+    print("DSM Loaded")
 
     #print(str(lidar_dom.meta))
 
@@ -122,17 +134,43 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
         return latitude + (meters * meterInDegree)
 
     totalNumberOfBuildings = 0
-    for x in range(longitudeGridIntervals-1):
-        for y in range(latitudeGridIntervals-1):
+    for x in range(longitudeGridIntervals):
+        for y in range(latitudeGridIntervals):
 
 
             print("Starting x,y=" + str( ( x, y ) ) )
 
 
-            gridCellLeft = addMeterLongitude( left, bottom, x * gridSquareSize * 1000 )
-            gridCellTop = addMeterLatitude( left, bottom, ( y + 1 ) * gridSquareSize * 1000 )
-            gridCellRight = addMeterLongitude( left, bottom, ( x + 1 ) * gridSquareSize * 1000 )
-            gridCellBottom = addMeterLatitude( left, bottom, y * gridSquareSize * 1000 )
+            gridCellLeft = addMeterLongitude( bottom, left, x * gridSquareSize * 1000 )
+            gridCellTop = addMeterLatitude( bottom, left, ( y + 1 ) * gridSquareSize * 1000 )
+            gridCellRight = addMeterLongitude( bottom, left, ( x + 1 ) * gridSquareSize * 1000 )
+            gridCellBottom = addMeterLatitude( bottom, left, y * gridSquareSize * 1000 )
+
+            #print("http://bboxfinder.com  grid_bbox: ( %f, %f, %f, %f )" % ( gridCellLeft, gridCellBottom, gridCellRight, gridCellTop ))
+
+
+            def checkNoDataInGridCell( data, noDataValue ):
+
+                ( gridCellLeftX, gridCellTopY ) = sourceTransformer( gridCellLeft, gridCellTop )
+                ( gridCellRightX, gridCellBottomY )  = sourceTransformer( gridCellRight, gridCellBottom )
+
+
+                ( gridCellTopRow, gridCellLeftCol ) = lidar_dtm.index( gridCellLeftX, gridCellTopY )
+                ( gridCellBottomRow, gridCellRightCol ) = lidar_dtm.index( gridCellRightX, gridCellBottomY )
+
+                gridCellData = data[ max(0,gridCellTopRow):max(0,gridCellBottomRow), max(0, gridCellLeftCol):max(0,gridCellRightCol) ]
+
+                return np.all( gridCellData == noDataValue )
+
+            
+            if( checkNoDataInGridCell(dtmData, lidar_dtm.nodata) ):
+                print("grid contains only no-data in DTM file: skipping")
+                continue
+
+            if( checkNoDataInGridCell(domData, lidar_dom.nodata) ):
+                print("grid contains only no-data in DOM file: skipping")
+                continue
+            
             
             buildingsResult = downloadBuildings( gridCellLeft, gridCellBottom, gridCellRight, gridCellTop )
 
@@ -141,8 +179,8 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
 
                 leftMostCol = math.inf
                 rightMostCol = 0
-                topMostRow = 0
-                bottomMostRow = math.inf
+                topMostRow = math.inf
+                bottomMostRow = 0
 
                 nodesRowCol = []
                 latitudeSum = 0
@@ -161,43 +199,43 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
                     row, col = lidar_dtm.index( xCoordinate, yCoordinate )
 
                     #print(str((row, col)))
+                    row = max(0, row)
+                    col = max(0, col)
 
                     nodesRowCol.append( ( row, col ) )
 
                     leftMostCol = min( leftMostCol, col )
                     rightMostCol = max( rightMostCol, col )
-                    topMostRow = max( topMostRow, row )
-                    bottomMostRow = min( bottomMostRow, row )
+                    topMostRow = min( topMostRow, row )
+                    bottomMostRow = max( bottomMostRow, row )
 
                 averageLat = latitudeSum / len(building.nodes)
                 averageLon = longitudeSum / len(building.nodes)
 
                 #print(str(nodesRowCol))
 
-                dtmSection = dtmData[ bottomMostRow:topMostRow, leftMostCol:rightMostCol ]
-                domSection = domData[ bottomMostRow:topMostRow, leftMostCol:rightMostCol ]
+                dtmSection = dtmData[ topMostRow:bottomMostRow, leftMostCol:rightMostCol ]
+                domSection = domData[ topMostRow:bottomMostRow, leftMostCol:rightMostCol ]
 
-                if(dtmSection.shape[0] == 0 or dtmSection.shape[1] == 0):
+
+                ( sectionHeight, sectionWidth ) = dtmSection.shape
+
+                if(sectionHeight == 0 or sectionWidth == 0):
                     continue
 
                 surfaceHeight = domSection - dtmSection
 
-                buildingOutline = Image.new( "1", (  rightMostCol - leftMostCol, topMostRow - bottomMostRow  ), 0 )
+                buildingOutline = Image.new( "1", (  sectionWidth, sectionHeight  ), 0 )
                 draw = ImageDraw.Draw(buildingOutline)
 
                 pxs = list()
                 for ( row, col ) in nodesRowCol:
-                    pxs.append( ( col - leftMostCol, row - bottomMostRow ) )
+                    pxs.append( ( col - leftMostCol, row - topMostRow ) )
 
                 draw.polygon( pxs, 1, 1 )
 
                 buildingOutlineArray = np.array( buildingOutline )
 
-
-                #imgplot = plt.imshow(domSection)
-                #plt.show()
-                #imgplot = plt.imshow(dtmSection)
-                #plt.show()
 
                 #f, axarr = plt.subplots(1,4)
                 #axarr[0].imshow(domSection)
@@ -205,22 +243,18 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
                 #axarr[2].imshow(surfaceHeight)
                 #axarr[3].imshow(buildingOutlineArray)
 
-                #print(str(domSection - dtmSection))
-
                 #plt.show()
 
                 #input("Press Enter to continue...")
+                #exit()
 
                 #print(str(building.id))
-
-                if(surfaceHeight[buildingOutlineArray].shape == (0,)):
-                    continue
 
                 buildingHeight = np.max( surfaceHeight[buildingOutlineArray] )
                 wayUrl = "https://www.openstreetmap.org/way/" + str( building.id ) + ": " + str(buildingHeight) 
                 print(wayUrl)
 
-
+                
                 if(buildingHeight > 0):
 
                     totalNumberOfBuildings = totalNumberOfBuildings + 1
@@ -232,7 +266,6 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
                     with open('buildings.txt', 'a') as f:
                         wayUrl = "https://www.openstreetmap.org/way/" + str( building.id ) + ": " + str(buildingHeight) 
                         f.write("\n" + wayUrl)
-
 
     outputFile.write('</osm>')
 
