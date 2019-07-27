@@ -90,11 +90,18 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
     
     sourceTransformer = partial(transform, wgsProj, sourceProj)
 
-
     print("Bounds in source coordinate system" + str(lidar_dtm.bounds))
 
-    left, top = sourceProj( lidar_dtm.bounds.left, lidar_dtm.bounds.top, inverse=True )
-    right, bottom =  sourceProj( lidar_dtm.bounds.right, lidar_dtm.bounds.bottom, inverse=True )
+    ( leftTopCornerLong, leftTopCornerLat ) = sourceProj( lidar_dtm.bounds.left, lidar_dtm.bounds.top, inverse=True )
+    ( rightTopCornerLong, rightTopCornerLat ) = sourceProj( lidar_dtm.bounds.right, lidar_dtm.bounds.top, inverse=True )
+    ( leftBottomCornerLong, leftBottomCornerLat ) = sourceProj( lidar_dtm.bounds.left, lidar_dtm.bounds.bottom, inverse=True )
+    ( rightBottomCornerLong, rightBottomCornerLat ) = sourceProj( lidar_dtm.bounds.right, lidar_dtm.bounds.bottom, inverse=True )
+
+    left = min( leftTopCornerLong, leftBottomCornerLong )
+    right = max( rightTopCornerLong, rightBottomCornerLong )
+    bottom = min( leftBottomCornerLat,rightBottomCornerLat )
+    top = max( leftTopCornerLat, rightTopCornerLat )
+
 
     boundsHeight = geopy.distance.geodesic( ( top, left ), ( bottom, left ) ).km
     boundsWidth = geopy.distance.geodesic( ( top, left ), ( top, right ) ).km
