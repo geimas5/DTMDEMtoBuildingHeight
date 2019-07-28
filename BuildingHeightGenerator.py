@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image, ImageDraw
 import time
+import re
 
 
 
@@ -19,10 +20,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument('dtmFile', type=str)
 parser.add_argument('domFile', type=str)
 parser.add_argument('outputFilename', type=str)
+parser.add_argument('differenceOutputFilename', type=str)
 parser.add_argument('--gridSquareSize', type=float, default=2)
 parser.add_argument('--overpassRetryCount', type=int, default=100)
 parser.add_argument('--overpassFailRetryDelay', type=int, default=15)
 parser.add_argument('--overpassApiUrl', type=str, default=None)
+parser.add_argument('--minimumBuildingHeight', type=float, default=1)
+parser.add_argument('--differenceThreshold', type=float, default=0.1)
 
 
 args = parser.parse_args()
@@ -34,6 +38,9 @@ overpassRetryCount = args.overpassRetryCount
 outputFilename = args.outputFilename
 overpassFailRetryDelay = args.overpassFailRetryDelay
 overpassApiUrl = args.overpassApiUrl
+minimumBuildingHeight = args.minimumBuildingHeight
+differenceThreshold = args.differenceThreshold
+differenceOutputFilename = args.differenceOutputFilename
 
 earthRadius = 6378.137
 meterInDegree = ( 1 / ( ( 2 * math.pi / 360) * earthRadius ) ) / 1000
@@ -57,6 +64,14 @@ def downloadBuildings( left, bottom, right, top ):
     ( 
       way["building"]; 
       way["building:part"]; 
+      way["man_made"="silo"];
+      way["man_made"="chimney"];
+      way["man_made"="communications_tower"];
+      way["man_made"="lighthouse"];
+      way["man_made"="storage_tank"];
+      way["man_made"="tower"];
+      way["man_made"="works"];
+
     );
     (._;>;);
     out meta;''' % ( bottom, left, top, right )
@@ -79,7 +94,10 @@ def downloadBuildings( left, bottom, right, top ):
         
 
 
-with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, open(outputFilename, "w") as outputFile:
+with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, open(outputFilename, "w") as outputFile, open(differenceOutputFilename, "w") as differenceOutputFile:
+
+
+    
 
     if lidar_dtm.bounds != lidar_dom.bounds:
         print("DTM and DOM does not cover the same extent")
@@ -132,6 +150,9 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
     outputFile.write('<?xml version="1.0" encoding="UTF-8"?>')
     outputFile.write('\n<osm version="0.6" generator="BuildingHeightGenerator">')
 
+    differenceOutputFile.write('<?xml version="1.0" encoding="UTF-8"?>')
+    differenceOutputFile.write('\n<osm version="0.6" generator="BuildingHeightGenerator">')
+
     def addMeterLongitude( latitude, longitude, meters):
 
         return longitude + (meters * meterInDegree) / math.cos( latitude * ( math.pi / 180 ) )
@@ -141,6 +162,8 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
         return latitude + (meters * meterInDegree)
 
     totalNumberOfBuildings = 0
+    totalDifferentBuildings = 0
+
     for x in range(longitudeGridIntervals):
         for y in range(latitudeGridIntervals):
 
@@ -216,8 +239,6 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
                     topMostRow = min( topMostRow, row )
                     bottomMostRow = max( bottomMostRow, row )
 
-                averageLat = latitudeSum / len(building.nodes)
-                averageLon = longitudeSum / len(building.nodes)
 
                 #print(str(nodesRowCol))
 
@@ -257,32 +278,81 @@ with rasterio.open(dtmFile) as lidar_dtm,  rasterio.open(domFile) as lidar_dom, 
 
                 #print(str(building.id))
 
-                buildingOutlineSurfaceHeight = surfaceHeight[buildingOutlineArray]
+                surfaceHeight[np.invert(buildingOutlineArray)] = 0
 
-                if(buildingOutlineSurfaceHeight.size == 0):
+                if(surfaceHeight.size == 0):
                     continue
 
-                buildingHeight = np.max( buildingOutlineSurfaceHeight )
+                buildingHeight = np.max( surfaceHeight )
                 wayUrl = "https://www.openstreetmap.org/way/" + str( building.id ) + ": " + str(buildingHeight) 
                 print(wayUrl)
 
                 
-                if(buildingHeight > 1):
+                if(buildingHeight > minimumBuildingHeight):
 
-                    buildingHeight = round(buildingHeight,1)
+                    highestPoints = np.argwhere(surfaceHeight == buildingHeight)
 
-                    totalNumberOfBuildings = totalNumberOfBuildings + 1
+                    centerPixelCol = surfaceHeight.shape[0] / 2
+                    centerPixelRow = surfaceHeight.shape[1] / 2
 
-                    outputFile.write('\n<node id="%d" lat="%f" lon="%f">' % ( -totalNumberOfBuildings, averageLat, averageLon ) )
-                    outputFile.write('\n  <tag k="height" v="%.1f" />' % buildingHeight)
-                    outputFile.write('\n</node>')
+                    def distanceFromCenter(point):
+                        return math.sqrt( ( point[0] - centerPixelCol )**2 + ( point[1] - centerPixelRow )**2 )
+                        
+
+                    middleMostPoint = highestPoints[0]
+                    bestDistanceFromCenter = distanceFromCenter(highestPoints[0])
+
+                    for i in range(1, highestPoints.shape[0] ):
+                        testDistanceFromCenter = distanceFromCenter( highestPoints[i] )
+                        if( testDistanceFromCenter < bestDistanceFromCenter ):
+                            middleMostPoint = highestPoints[i]
+                            bestDistanceFromCenter = testDistanceFromCenter
+
+                    ( highestPointX, highestPointY ) = lidar_dtm.xy( middleMostPoint[0] + topMostRow, middleMostPoint[1] + leftMostCol )
+
+                    ( highestPointLon, highestPointLat ) = sourceProj( highestPointX, highestPointY, inverse=True )
+
+
+                    totalNumberOfBuildings += 1
+
+                    buildingHeightNode = ('\n  <node id="%d" lat="%f" lon="%f">' 
+                                          '\n    <tag k="height" v="%.1f" />'
+                                          '\n  </node>' ) % ( -totalNumberOfBuildings, highestPointLat, highestPointLon, round(buildingHeight, 1) )
+
+                    outputFile.write( buildingHeightNode )
+
+                    def isDifferent():
+
+                        if( "height" not in building.tags ):
+                            return True
+
+                        height = building.tags["height"]
+
+                        match = re.search(" *([0-9.]+) *m* *", height, re.IGNORECASE)
+
+                        if(match):
+                            try:
+                                existingHeight = float(match.group(1))
+
+                                if(abs(existingHeight - round(buildingHeight, 1)) < differenceThreshold ):
+                                    return False
+                                else:
+                                    return True
+                            except:
+                                return True
+
+                    if( isDifferent() ):
+                        differenceOutputFile.write(buildingHeightNode)
+                        totalDifferentBuildings += 1
 
                     with open('buildings.txt', 'a') as f:
                         wayUrl = "https://www.openstreetmap.org/way/" + str( building.id ) + ": " + str(buildingHeight) 
                         f.write("\n" + wayUrl)
 
-    outputFile.write('</osm>')
+    outputFile.write('\n</osm>')
+    differenceOutputFile.write('\n</osm>')
 
 
     print("\n\n\nTotal number of buildings: %d" % totalNumberOfBuildings )
+    print("\n\n\nTotal number of different buildings: %d" % totalNumberOfBuildings )
 
